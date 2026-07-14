@@ -1,0 +1,62 @@
+name: "${COMPOSE_PROJECT_NAME:-hydrojudge-docker}"
+
+services:
+  hydrojudge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GOJUDGE_VERSION: "${GOJUDGE_VERSION:-v1.12.1}"
+        HYDROJUDGE_VERSION: "${HYDROJUDGE_VERSION:-4.0.5}"
+    image: hydrojudge-worker:local
+    restart: unless-stopped
+    privileged: true
+
+    cpus: "${CONTAINER_CPUS:-4.0}"
+    mem_limit: "${CONTAINER_MEMORY_LIMIT:-8g}"
+    memswap_limit: "${CONTAINER_MEMORY_SWAP_LIMIT:-8g}"
+    shm_size: "${CONTAINER_SHM_SIZE:-2g}"
+
+    ulimits:
+      stack:
+        soft: -1
+        hard: -1
+
+    environment:
+      TZ: "${TZ:-Asia/Kuala_Lumpur}"
+      HYDRO_SERVER_URL: "${HYDRO_SERVER_URL}"
+      HYDRO_JUDGE_UNAME: "${HYDRO_JUDGE_UNAME}"
+      HYDRO_JUDGE_PASSWORD: "${HYDRO_JUDGE_PASSWORD}"
+      HYDRO_HOST_TYPE: "${HYDRO_HOST_TYPE:-hydro}"
+
+      HYDRO_MEMORY_MAX: "${HYDRO_MEMORY_MAX:-2048m}"
+      HYDRO_STDIO_SIZE: "${HYDRO_STDIO_SIZE:-256m}"
+      HYDRO_STRICT_MEMORY: "${HYDRO_STRICT_MEMORY:-false}"
+      HYDRO_TESTCASES_MAX: "${HYDRO_TESTCASES_MAX:-450}"
+      HYDRO_TOTAL_TIME_LIMIT: "${HYDRO_TOTAL_TIME_LIMIT:-3000}"
+      HYDRO_PROCESS_LIMIT: "${HYDRO_PROCESS_LIMIT:-32}"
+      HYDRO_PARALLELISM: "${HYDRO_PARALLELISM:-3}"
+      HYDRO_CONCURRENCY: "${HYDRO_CONCURRENCY:-3}"
+      HYDRO_DETAIL: "${HYDRO_DETAIL:-full}"
+      HYDRO_RERUN: "${HYDRO_RERUN:-1}"
+      HYDRO_PERFORMANCE: "${HYDRO_PERFORMANCE:-true}"
+      HYDRO_SANDBOX_HOST: "${HYDRO_SANDBOX_HOST:-http://127.0.0.1:5050}"
+
+      GOJUDGE_HTTP_ADDR: "${GOJUDGE_HTTP_ADDR:-127.0.0.1:5050}"
+      GOJUDGE_PARALLELISM: "${GOJUDGE_PARALLELISM:-3}"
+      GOJUDGE_OUTPUT_LIMIT: "${GOJUDGE_OUTPUT_LIMIT:-256m}"
+      GOJUDGE_COPY_OUT_LIMIT: "${GOJUDGE_COPY_OUT_LIMIT:-256m}"
+      GOJUDGE_FILE_TIMEOUT: "${GOJUDGE_FILE_TIMEOUT:-30m}"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 2 \"http://$${GOJUDGE_HTTP_ADDR}/version\" >/dev/null"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
+    volumes:
+      - type: volume
+        target: /data/cache
+      - type: volume
+        target: /data/tmp

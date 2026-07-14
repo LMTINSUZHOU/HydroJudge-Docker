@@ -1,0 +1,67 @@
+c:
+  compile: /usr/bin/gcc-15 -Wall --std=c99 -o foo foo.c -lm
+  highlight: c
+  monaco: c
+  display: C
+  version: /usr/bin/gcc-15 --version
+
+cc:
+  compile: /usr/bin/g++-15 -Wall -std=c++14 -o foo foo.cc -lm -I/include
+  code_file: foo.cc
+  highlight: cpp
+  monaco: cpp
+  display: C++
+  address_space_limit: true
+  process_limit: 1
+  version: /usr/bin/g++-15 --version
+  compile_time_limit: 10000
+
+cc.cc20o2:
+  compile: /usr/bin/g++-15 -Wall -std=c++20 -o foo foo.cc -lm -O2 -I/include
+  display: C++20(O2)
+
+cc.cc23o2:
+  compile: /usr/bin/g++-15 -Wall -std=c++23 -o foo foo.cc -lm -O2 -I/include
+  display: C++23(O2)
+
+cc.cc26o2:
+  compile: /usr/bin/g++-15 -Wall -std=c++26 -o foo foo.cc -lm -O2 -I/include
+  display: C++26(O2)
+
+java:
+  compile: >-
+    /usr/bin/bash -c "rm -rf /w/classes && mkdir -p /w/classes && javac -encoding UTF-8 -d /w/classes ./Main.java && jar cf /w/Main.jar -C /w/classes ."
+  code_file: Main.java
+  target: Main.jar
+  execute: /usr/bin/java -XX:+UseSerialGC -Xss64m -XX:MaxRAMPercentage=70.0 -cp /w/Main.jar Main
+  time_limit_rate: 2
+  highlight: java astyle-java
+  monaco: java
+  display: Java
+  compile_time_limit: 30000
+  compile_memory_limit: 1024
+  version: /usr/bin/javac -version
+
+py:
+  compile: >-
+    /usr/bin/python3.12 -c "import py_compile; py_compile.compile('/w/foo.py', doraise=True)"
+  code_file: foo.py
+  target: foo.py
+  execute: /usr/bin/python3.12 -B /w/foo.py
+  time_limit_rate: 2
+  highlight: python
+  monaco: python
+  display: Python 3.12
+  version: /usr/bin/python3.12 --version
+
+py.pypy3:
+  compile: >-
+    /usr/bin/pypy3 -c "import py_compile; py_compile.compile('/w/foo.py', doraise=True)"
+  code_file: foo.py
+  target: foo.py
+  execute: /usr/bin/pypy3 -B /w/foo.py
+  time_limit_rate: 2
+  highlight: python
+  monaco: python
+  display: PyPy3
+  version: /usr/bin/pypy3 --version

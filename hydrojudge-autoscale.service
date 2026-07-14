@@ -1,0 +1,19 @@
+[Unit]
+Description=HydroJudge Docker 自动扩容器
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=@INSTALL_DIR@
+ExecStart=@PYTHON_BIN@ @INSTALL_DIR@/autoscale.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+.env
+.autoscale.lock
+.autoscale.pause
+.hydrojudge-install
+.DS_Store
+__pycache__/
+*.py[cod]
+__pycache__/
+*.pyc
+*.log
+*.zip

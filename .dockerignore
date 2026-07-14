@@ -1,0 +1,9 @@
+.git
+node_modules
+__pycache__
+tests
+*.log
+.env
+.autoscale.lock
+.autoscale.pause
+.hydrojudge-install

@@ -1,0 +1,28 @@
+hosts:
+  default:
+    type: ${HYDRO_HOST_TYPE_YAML}
+    server_url: ${HYDRO_SERVER_URL_YAML}
+    uname: ${HYDRO_JUDGE_UNAME_YAML}
+    password: ${HYDRO_JUDGE_PASSWORD_YAML}
+
+sandbox_host: ${HYDRO_SANDBOX_HOST_YAML}
+
+cache_dir: /data/cache
+tmp_dir: /data/tmp
+
+stdio_size: ${HYDRO_STDIO_SIZE}
+memoryMax: ${HYDRO_MEMORY_MAX}
+strict_memory: ${HYDRO_STRICT_MEMORY}
+testcases_max: ${HYDRO_TESTCASES_MAX}
+total_time_limit: ${HYDRO_TOTAL_TIME_LIMIT}
+processLimit: ${HYDRO_PROCESS_LIMIT}
+parallelism: ${HYDRO_PARALLELISM}
+concurrency: ${HYDRO_CONCURRENCY}
+detail: ${HYDRO_DETAIL_YAML}
+rerun: ${HYDRO_RERUN}
+performance: ${HYDRO_PERFORMANCE}
+
+env: |
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  HOME=/w
+  PYTHONPATH=/usr/lib/python3/dist-packages
