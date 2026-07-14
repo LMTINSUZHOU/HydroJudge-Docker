@@ -51,8 +51,11 @@ py:
   time_limit_rate: 2
   highlight: python
   monaco: python
-  display: Python 3.12
+  display: Python
   version: /usr/bin/python3.12 --version
+
+py.py3:
+  display: Python3.12
 
 py.pypy3:
   compile: >-
