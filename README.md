@@ -2,6 +2,27 @@
 
 本项目在同一个 Docker 容器中运行 `go-judge` 沙箱和 `hydrojudge`，用于连接远端 Hydro 服务并执行评测任务。
 
+适用范围：单台使用 systemd 的 Linux Docker 宿主机。项目提供固定版本构建、配置校验、中文环境诊断、手动副本管理和仅向上自动扩容；不负责 Hydro 主站安装，也不提供跨主机调度。
+
+## 快速开始（推荐流程）
+
+```bash
+cp .env.example .env
+chmod 600 .env
+nano .env
+
+# 安装前只检查文件、配置和工具，不要求容器已经运行
+./doctor.sh --skip-runtime
+
+# 安装并启动
+sudo ./install.sh install
+
+# 安装后检查容器、健康状态和自动扩容服务
+sudo /opt/hydrojudge-docker/doctor.sh
+```
+
+遇到问题时，优先运行 `doctor.sh`。它不会修改配置、重启容器或调整副本数，也不会输出账号密码。
+
 ## 1. 准备 Hydro
 
 在 Hydro 中创建专用评测账号，并为该账号授予 `PRIV_JUDGE` 权限。
@@ -24,12 +45,20 @@ chmod 600 .env
 - `HYDRO_JUDGE_UNAME`：评测账号用户名；
 - `HYDRO_JUDGE_PASSWORD`：评测账号密码。
 
-建议为 4 核 CPU、8 GB 内存的单副本评测机使用以下配置：
+密码中含有 `$`、`#` 或空格时，建议在 `.env` 中使用单引号，防止 Docker Compose 插值或截断：
+
+```env
+HYDRO_JUDGE_PASSWORD='包含$和#的密码'
+```
+
+单引号值会按字面量读取；密码本身包含单引号时写成 `\'`。可用 `docker compose config --environment` 检查变量是否被读取，但不要把该命令的完整输出发送到公开渠道。
+
+建议为 4 核 CPU、12 GB 内存的单副本评测机使用以下配置：
 
 ```env
 CONTAINER_CPUS=4.0
-CONTAINER_MEMORY_LIMIT=8g
-CONTAINER_MEMORY_SWAP_LIMIT=8g
+CONTAINER_MEMORY_LIMIT=12g
+CONTAINER_MEMORY_SWAP_LIMIT=12g
 CONTAINER_SHM_SIZE=2g
 
 HYDRO_MEMORY_MAX=2048m
@@ -40,7 +69,7 @@ GOJUDGE_PARALLELISM=3
 
 这些配置表示：
 
-- 单个评测容器最多使用 4 核 CPU 和 8 GB 内存；
+- 单个评测容器最多使用 4 核 CPU 和 12 GB 内存；
 - HydroJudge 最多同时处理 3 个任务；
 - 单个评测任务允许的最大内存为 2048 MB；
 - 剩余资源用于编译器、输出缓冲区、Node.js 和沙箱本身。
@@ -69,6 +98,12 @@ GOJUDGE_PARALLELISM=2
 sudo ./install.sh install
 ```
 
+建议安装前先运行只读诊断：
+
+```bash
+./doctor.sh --skip-runtime
+```
+
 为了兼容旧用法，首次安装时也可以直接执行 `sudo ./install.sh`。
 
 也可以指定其他配置文件：
@@ -84,9 +119,10 @@ sudo ./install.sh install --env-file /path/to/production.env
 3. 将程序安装到 `/opt/hydrojudge-docker`；
 4. 将账号配置保存到 `/etc/hydrojudge-docker/hydrojudge.env`，权限设置为 `0600`；
 5. 运行自动扩容算法测试；
-6. 构建并启动评测容器；
-7. 安装并启动 `hydrojudge-autoscale.service`；
-8. 设置自动扩容服务开机启动。
+6. 校验自动扩容参数与宿主机安全容量；
+7. 构建并启动评测容器，等待全部副本通过健康检查；
+8. 安装并启动 `hydrojudge-autoscale.service`；
+9. 保存一份权限为 `0600` 的“上次成功配置”，用于更新失败回滚。
 
 常用安装选项：
 
@@ -119,6 +155,12 @@ sudo /opt/hydrojudge-docker/install.sh help
 ```bash
 systemctl status hydrojudge-autoscale.service
 journalctl -u hydrojudge-autoscale.service -f
+```
+
+执行完整的只读环境诊断：
+
+```bash
+sudo /opt/hydrojudge-docker/doctor.sh
 ```
 
 ## 4. 手动构建并启动
@@ -156,6 +198,8 @@ docker compose ps hydrojudge
 
 副本数必须是非负整数。设置为 `0` 可以停止所有评测副本，但不会删除镜像和数据卷。
 
+`scale.sh` 会等待所有目标副本通过健康检查后再返回成功，默认最长等待 150 秒。若容器提前退出或变为 `unhealthy`，脚本会返回非零退出码并提示查看 Compose 状态和日志。
+
 ## 6. 自动扩容
 
 `autoscale.py` 运行在 Docker 宿主机上，定期读取所有 HydroJudge 容器的 CPU 和内存使用率，并根据总负载计算所需副本数。
@@ -168,6 +212,7 @@ docker compose ps hydrojudge
 - 根据宿主机资源和单副本资源限制计算安全上限；
 - 使用进程锁，防止同时启动多个自动扩容器；
 - Docker 短暂异常不会导致监控进程退出；
+- 新增副本必须通过健康检查，失败会记录错误并在后续采样中重试；
 - 默认只自动扩容，不自动缩容，避免终止正在运行的评测任务。
 
 运行自动扩容器需要宿主机已经安装：
@@ -220,7 +265,7 @@ docker compose ps hydrojudge
 - `AUTOSCALE_HOST_HEADROOM_PERCENT`；
 - `AUTOSCALE_MAX_REPLICAS`。
 
-例如，单副本限制为 4 核 CPU、8 GB 内存时，只有约 8 GB 内存的 Docker 宿主机会被限制为最多一个副本。若要安全运行多个副本，应使用更大的宿主机，或者同步降低单副本资源限制和评测并发数。
+例如，单副本限制为 4 核 CPU、12 GB 内存时，建议宿主机至少提供 16 GB 内存；在预留 10% 宿主机资源的默认策略下，约 32 GB 内存最多允许两个 12 GB 副本。若要安全运行更多副本，应使用更大的宿主机，或者同步降低单副本资源限制和评测并发数。
 
 不建议关闭宿主机容量保护，否则多个容器的资源上限可能超过宿主机容量并触发 OOM。
 
@@ -256,9 +301,12 @@ sudo /opt/hydrojudge-docker/install.sh update-version \
 5. 根据新版本无缓存重建镜像；
 6. 保留当前正在运行的副本数，且不会自动缩容；
 7. 使用新镜像重建评测容器；
-8. 重启自动扩容服务并显示容器状态。
+8. 等待全部副本通过健康检查；
+9. 重启自动扩容服务并显示容器状态。
 
 版本更新会重建容器，可能中断正在执行的评测任务，应在维护时间执行。
+
+更新前会保留当前镜像标签和上次成功配置。如果构建或容器重建失败，脚本会恢复旧配置与旧镜像，并尽力按更新前的副本数重建容器。自动回滚也可能因 Docker 本身不可用而失败，此时脚本会给出明确警告，应立即运行 `doctor.sh` 查看状态。
 
 ## 8. 更新评测机配置
 
@@ -283,9 +331,12 @@ sudo /opt/hydrojudge-docker/install.sh update-config \
 3. 将正式配置权限固定为 `0600`；
 4. 暂停自动扩容并通过 Compose 应用配置；
 5. 保留当前副本数，允许按新的 `WORKER_REPLICAS` 扩容，但不会自动缩容；
-6. 重启自动扩容服务，使新的自动扩容参数立即生效。
+6. 等待所有副本通过健康检查；
+7. 重启自动扩容服务，使新的自动扩容参数立即生效。
 
 `update-config` 不重建镜像。如果修改了 `GOJUDGE_VERSION` 或 `HYDROJUDGE_VERSION`，脚本会拒绝继续并提示使用 `update-version`。修改容器资源、环境变量等设置时，Compose 可能重建容器，因此也建议在维护时间执行。
+
+脚本使用 `/etc/hydrojudge-docker/hydrojudge.env.last-good` 识别版本或项目名变更，并在应用失败时恢复上次成功配置。不要手动删除该文件；它和正式配置一样包含敏感信息，权限固定为 `0600`。
 
 ## 9. 一键卸载
 
@@ -361,8 +412,8 @@ docker inspect $(docker compose ps -q hydrojudge) \
 
 ```text
 NanoCpus=4000000000
-Memory=8589934592
-MemorySwap=8589934592
+Memory=12884901888
+MemorySwap=12884901888
 ShmSize=2147483648
 ```
 
@@ -419,6 +470,7 @@ docker compose exec hydrojudge bash -lc 'gcc --version && g++ --version && javac
 - `entrypoint.sh` 会自动为缺少结尾 `/` 的 `HYDRO_SERVER_URL` 补全斜杠；
 - URL、用户名和密码在写入 YAML 前会进行安全转义；
 - `.env` 包含评测账号密码，已经从 Docker 构建上下文和 Git 中排除，但仍不应上传或放入共享压缩包；
+- 评测密码需要作为容器环境变量传入，拥有 Docker 管理权限的用户可通过容器元数据读取它；Docker 管理权限应只授予可信管理员；
 - 一键安装后的正式配置位于 `/etc/hydrojudge-docker/hydrojudge.env`；
 - 如果 `.env` 或原始压缩包曾经公开，应立即更换评测账号密码；
 - 启用新的语言前，必须同时在 Dockerfile 中安装相应编译器，并在 Hydro 服务端配置对应命令；
@@ -432,6 +484,13 @@ docker compose exec hydrojudge bash -lc 'gcc --version && g++ --version && javac
 docker compose config --quiet
 ```
 
+运行统一的中文诊断（推荐）：
+
+```bash
+./doctor.sh --skip-runtime  # 源码目录或安装前
+sudo /opt/hydrojudge-docker/doctor.sh  # 已安装环境
+```
+
 运行自动扩容算法测试：
 
 ```bash
@@ -441,5 +500,37 @@ python3 -m unittest discover -s tests -v
 检查 Shell 脚本语法：
 
 ```bash
-bash -n entrypoint.sh scale.sh update.sh install.sh uninstall.sh
+bash -n entrypoint.sh scale.sh doctor.sh update.sh install.sh uninstall.sh
 ```
+
+## 15. 常见故障排查
+
+| 现象 | 先执行 | 常见原因与处理 |
+| --- | --- | --- |
+| `docker compose config` 提示必填变量缺失 | `./doctor.sh --skip-runtime` | `.env` 不在项目目录、键名拼错，或密码中的 `$` 被展开；按 `.env.example` 修正并用单引号包住复杂密码 |
+| 容器反复重启 | `docker compose logs --tail=200 hydrojudge` | Hydro 地址、账号权限、沙箱启动或运行时配置错误；先查看日志中第一条“配置错误”或“go-judge 未就绪” |
+| 容器状态为 `unhealthy` | `docker compose exec hydrojudge curl -fsS http://127.0.0.1:5050/version` | go-judge 未启动、监听地址与健康检查不一致，或容器资源不足 |
+| 评测一直等待或速度慢 | `docker compose stats --no-stream hydrojudge` | 并发设置过低、CPU/内存达到上限，或 Hydro 端队列积压；结合自动扩容日志判断 |
+| 自动扩容不工作 | `journalctl -u hydrojudge-autoscale.service -n 200 --no-pager` | 服务未启动、配置不合法、进程锁冲突、Docker 无法访问，或有效上限已被宿主机容量保护限制 |
+| 手动缩容后又恢复 | `systemctl status hydrojudge-autoscale.service` | 自动扩容器会维持 `AUTOSCALE_MIN_REPLICAS`；先停止服务或调整最小副本数 |
+| 更新失败 | `sudo /opt/hydrojudge-docker/doctor.sh` | 脚本会尝试回滚；确认 `.last-good` 配置、镜像和容器状态，再查看更新输出中的回滚警告 |
+| 构建下载缓慢或软件源不可达 | 检查 `.env` 中的 `UBUNTU_MIRROR`、`NPM_REGISTRY` | 国内默认清华镜像与 npmmirror；海外可改为 Ubuntu 官方源和 `https://registry.npmjs.org`，内网环境可使用受信任镜像 |
+
+需要收集日志时，建议提供以下不含配置明文的输出：
+
+```bash
+sudo /opt/hydrojudge-docker/doctor.sh
+docker compose ps hydrojudge
+docker compose logs --tail=200 hydrojudge
+journalctl -u hydrojudge-autoscale.service -n 200 --no-pager
+```
+
+不要公开 `.env`、`/etc/hydrojudge-docker/hydrojudge.env` 或完整的 `docker inspect` 输出。
+
+## 16. 已知限制与设计取舍
+
+- 容器必须使用 `privileged: true` 才能创建评测沙箱，因此该宿主机不应运行不可信的其他管理工作负载；
+- 自动扩容只观察容器 CPU 和内存，不读取 Hydro 队列长度，只向上扩容且不会自动缩容；
+- 更新和配置变更可能重建容器，无法保证正在执行的题目不中断，生产环境应安排维护窗口；
+- Compose 方案只覆盖单台宿主机；跨主机高可用、队列感知扩缩容和滚动更新需要 Kubernetes、Swarm 或其他编排系统；
+- 当前镜像构建固定主要组件版本，但 Ubuntu APT 依赖仍随软件源变化；如需完全可复现构建，还需锁定基础镜像摘要和 APT 包版本。

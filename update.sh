@@ -12,6 +12,7 @@ fi
 
 CONFIG_DIR="/etc/hydrojudge-docker"
 CONFIG_FILE="${CONFIG_DIR}/hydrojudge.env"
+LAST_GOOD_CONFIG="${CONFIG_FILE}.last-good"
 SERVICE_NAME="hydrojudge-autoscale.service"
 ACTION="update-version"
 ENV_FILE=""
@@ -20,13 +21,20 @@ REQUESTED_HYDROJUDGE_VERSION=""
 AUTOSCALER_WAS_ACTIVE=false
 CANDIDATE_ENV=""
 NEXT_ENV=""
+ROLLBACK_CONFIG=""
+ROLLBACK_IMAGE=""
+TARGET_IMAGE=""
+CONFIG_COMMITTED=false
+DEPLOY_STARTED=false
+IMAGE_MUTATED=false
+ROLLBACK_REPLICAS=0
 
 log() {
-  echo "[update] $*"
+  echo "[更新] $*"
 }
 
 fail() {
-  echo "[update] error: $*" >&2
+  echo "[更新] 错误：$*" >&2
   exit 1
 }
 
@@ -133,6 +141,10 @@ INSTALL_DIR="$(cd -- "$INSTALL_DIR" && pwd -P)"
   || fail "安装目录缺少 .hydrojudge-install 标记：$INSTALL_DIR"
 [[ -f "${INSTALL_DIR}/docker-compose.yml" ]] \
   || fail "安装目录缺少 docker-compose.yml：$INSTALL_DIR"
+[[ -f "${INSTALL_DIR}/validate_config.py" ]] \
+  || fail "安装目录缺少 validate_config.py；请先重新执行 install 覆盖安装程序文件"
+[[ -f "${INSTALL_DIR}/wait_healthy.py" ]] \
+  || fail "安装目录缺少 wait_healthy.py；请先重新执行 install 覆盖安装程序文件"
 
 if [[ -n "$ENV_FILE" ]]; then
   [[ -f "$ENV_FILE" ]] || fail "配置文件不存在：$ENV_FILE"
@@ -175,12 +187,60 @@ umask 077
 install -d -m 0755 "$CONFIG_DIR"
 CANDIDATE_ENV="$(mktemp "${CONFIG_DIR}/.hydrojudge.env.XXXXXX")"
 NEXT_ENV="${CANDIDATE_ENV}.next"
+ROLLBACK_CONFIG="$(mktemp "${CONFIG_DIR}/.hydrojudge.rollback.XXXXXX")"
+
+if [[ -f "$LAST_GOOD_CONFIG" ]]; then
+  install -m 0600 "$LAST_GOOD_CONFIG" "$ROLLBACK_CONFIG"
+elif [[ -f "$CONFIG_FILE" ]]; then
+  install -m 0600 "$CONFIG_FILE" "$ROLLBACK_CONFIG"
+else
+  rm -f "$ROLLBACK_CONFIG"
+  ROLLBACK_CONFIG=""
+fi
+
+rollback_update() {
+  if [[ -z "$ROLLBACK_CONFIG" || ! -f "$ROLLBACK_CONFIG" ]]; then
+    log "警告：没有可用的上次成功配置，无法自动回滚配置文件"
+    return 1
+  fi
+
+  log "更新失败，正在恢复上次成功配置"
+  install -m 0600 "$ROLLBACK_CONFIG" "$CONFIG_FILE"
+  rm -f "${INSTALL_DIR}/.env"
+  ln -s "$CONFIG_FILE" "${INSTALL_DIR}/.env"
+
+  if $IMAGE_MUTATED; then
+    if [[ -n "$ROLLBACK_IMAGE" ]] && docker image inspect "$ROLLBACK_IMAGE" >/dev/null 2>&1; then
+      log "恢复更新前的评测机镜像"
+      docker image tag "$ROLLBACK_IMAGE" "$TARGET_IMAGE"
+    else
+      log "警告：没有可用的旧镜像，只能保留新镜像并恢复旧配置"
+    fi
+  fi
+
+  if $DEPLOY_STARTED || $IMAGE_MUTATED; then
+    log "尝试恢复更新前的容器，副本数=$ROLLBACK_REPLICAS"
+    (
+      cd "$INSTALL_DIR"
+      docker compose up -d --force-recreate --scale hydrojudge="$ROLLBACK_REPLICAS" hydrojudge
+      python3 ./wait_healthy.py --replicas "$ROLLBACK_REPLICAS" --timeout 150
+    ) || log "警告：容器自动恢复失败，请运行 doctor.sh 并检查 docker compose logs"
+  fi
+}
 
 cleanup() {
-  rm -f -- "$CANDIDATE_ENV" "$NEXT_ENV" "${INSTALL_DIR}/.autoscale.pause"
+  local exit_code=$?
+  trap - EXIT
+  rm -f -- "${INSTALL_DIR}/.autoscale.pause"
+  if (( exit_code != 0 )) && $CONFIG_COMMITTED; then
+    rollback_update || true
+  fi
   if $AUTOSCALER_WAS_ACTIVE; then
     systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
   fi
+  [[ -n "$ROLLBACK_IMAGE" ]] && docker image rm "$ROLLBACK_IMAGE" >/dev/null 2>&1 || true
+  rm -f -- "$CANDIDATE_ENV" "$NEXT_ENV" "$ROLLBACK_CONFIG"
+  exit "$exit_code"
 }
 trap cleanup EXIT
 
@@ -267,29 +327,7 @@ set_env_value() {
 validate_config() {
   local env_file="$1"
   docker compose --env-file "$env_file" -f "${INSTALL_DIR}/docker-compose.yml" config --format json \
-    | python3 -c '
-import json, re, sys
-service = json.load(sys.stdin)["services"]["hydrojudge"]
-env = service["environment"]
-required = ("HYDRO_SERVER_URL", "HYDRO_JUDGE_UNAME", "HYDRO_JUDGE_PASSWORD")
-missing = [name for name in required if not str(env.get(name, "")).strip()]
-if missing:
-    print("缺少必要配置：" + ", ".join(missing), file=sys.stderr)
-    raise SystemExit(1)
-if env["HYDRO_JUDGE_PASSWORD"] == "change_me":
-    print("HYDRO_JUDGE_PASSWORD 仍为示例密码 change_me", file=sys.stderr)
-    raise SystemExit(1)
-if "example.com" in env["HYDRO_SERVER_URL"]:
-    print("HYDRO_SERVER_URL 仍为示例站点", file=sys.stderr)
-    raise SystemExit(1)
-build_args = service["build"]["args"]
-if not re.fullmatch(r"v\d+\.\d+\.\d+(?:[+-][0-9A-Za-z.-]+)?", build_args["GOJUDGE_VERSION"]):
-    print("GOJUDGE_VERSION 格式无效", file=sys.stderr)
-    raise SystemExit(1)
-if not re.fullmatch(r"\d+\.\d+\.\d+(?:[+-][0-9A-Za-z.-]+)?", build_args["HYDROJUDGE_VERSION"]):
-    print("HYDROJUDGE_VERSION 格式无效", file=sys.stderr)
-    raise SystemExit(1)
-'
+    | python3 "${INSTALL_DIR}/validate_config.py" --quiet
 }
 
 config_versions() {
@@ -308,25 +346,33 @@ config_project_name() {
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])'
 }
 
+config_image_name() {
+  local env_file="$1"
+  docker compose --env-file "$env_file" -f "${INSTALL_DIR}/docker-compose.yml" config --format json \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["hydrojudge"]["image"])'
+}
+
 log "校验候选配置"
 validate_config "$CANDIDATE_ENV"
 NEW_VERSIONS="$(config_versions "$CANDIDATE_ENV")"
 NEW_PROJECT_NAME="$(config_project_name "$CANDIDATE_ENV")"
+TARGET_IMAGE="$(config_image_name "$CANDIDATE_ENV")"
 IFS='|' read -r GOJUDGE_VERSION HYDROJUDGE_VERSION <<<"$NEW_VERSIONS"
 [[ "$GOJUDGE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] \
   || fail "配置中的 GOJUDGE_VERSION 无效：$GOJUDGE_VERSION"
 [[ "$HYDROJUDGE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] \
   || fail "配置中的 HYDROJUDGE_VERSION 无效：$HYDROJUDGE_VERSION"
 
-if [[ -f "$CONFIG_FILE" ]]; then
-  OLD_PROJECT_NAME="$(config_project_name "$CONFIG_FILE" 2>/dev/null || true)"
+BASELINE_ENV="${ROLLBACK_CONFIG:-$CONFIG_FILE}"
+if [[ -f "$BASELINE_ENV" ]]; then
+  OLD_PROJECT_NAME="$(config_project_name "$BASELINE_ENV" 2>/dev/null || true)"
   if [[ -n "$OLD_PROJECT_NAME" && "$OLD_PROJECT_NAME" != "$NEW_PROJECT_NAME" ]]; then
     fail "不允许在更新时修改 COMPOSE_PROJECT_NAME（${OLD_PROJECT_NAME} -> ${NEW_PROJECT_NAME}）"
   fi
 fi
 
-if [[ "$ACTION" == "update-config" && -f "$CONFIG_FILE" ]]; then
-  OLD_VERSIONS="$(config_versions "$CONFIG_FILE" 2>/dev/null || true)"
+if [[ "$ACTION" == "update-config" && -f "$BASELINE_ENV" ]]; then
+  OLD_VERSIONS="$(config_versions "$BASELINE_ENV" 2>/dev/null || true)"
   if [[ -n "$OLD_VERSIONS" && "$OLD_VERSIONS" != "$NEW_VERSIONS" ]]; then
     fail "检测到评测机版本发生变化；请改用 update-version"
   fi
@@ -348,6 +394,10 @@ if (( RUNNING_REPLICAS > CONFIGURED_REPLICAS )); then
 else
   REPLICAS="$CONFIGURED_REPLICAS"
 fi
+ROLLBACK_REPLICAS="$RUNNING_REPLICAS"
+
+log "校验自动扩容参数和宿主机容量"
+python3 "${INSTALL_DIR}/autoscale.py" --check-config --env-file "$CANDIDATE_ENV"
 
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
   AUTOSCALER_WAS_ACTIVE=true
@@ -358,16 +408,26 @@ log "保存配置到 $CONFIG_FILE"
 install -m 0600 "$CANDIDATE_ENV" "$CONFIG_FILE"
 rm -f "${INSTALL_DIR}/.env"
 ln -s "$CONFIG_FILE" "${INSTALL_DIR}/.env"
+CONFIG_COMMITTED=true
 docker compose config --quiet
 
 if [[ "$ACTION" == "update-version" ]]; then
+  if docker image inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
+    ROLLBACK_IMAGE="hydrojudge-update-rollback:${$}"
+    docker image tag "$TARGET_IMAGE" "$ROLLBACK_IMAGE"
+  fi
   log "重建评测机镜像：go-judge=${GOJUDGE_VERSION}, HydroJudge=${HYDROJUDGE_VERSION}"
   docker compose build --pull --no-cache hydrojudge
+  IMAGE_MUTATED=true
   log "使用新镜像重建评测容器，副本数=$REPLICAS"
+  DEPLOY_STARTED=true
   docker compose up -d --force-recreate --scale hydrojudge="$REPLICAS" hydrojudge
+  python3 ./wait_healthy.py --replicas "$REPLICAS"
 else
   log "应用新配置，副本数=$REPLICAS"
+  DEPLOY_STARTED=true
   docker compose up -d --scale hydrojudge="$REPLICAS" hydrojudge
+  python3 ./wait_healthy.py --replicas "$REPLICAS"
 fi
 
 rm -f "${INSTALL_DIR}/.autoscale.pause"
@@ -376,7 +436,9 @@ if $AUTOSCALER_WAS_ACTIVE; then
   AUTOSCALER_WAS_ACTIVE=false
 fi
 
-rm -f -- "$CANDIDATE_ENV" "$NEXT_ENV"
+install -m 0600 "$CONFIG_FILE" "$LAST_GOOD_CONFIG"
+[[ -n "$ROLLBACK_IMAGE" ]] && docker image rm "$ROLLBACK_IMAGE" >/dev/null 2>&1 || true
+rm -f -- "$CANDIDATE_ENV" "$NEXT_ENV" "$ROLLBACK_CONFIG"
 trap - EXIT
 
 log "更新完成"

@@ -18,11 +18,11 @@ PURGE_CONFIG=false
 ASSUME_YES=false
 
 log() {
-  echo "[uninstall] $*"
+  echo "[卸载] $*"
 }
 
 fail() {
-  echo "[uninstall] error: $*" >&2
+  echo "[卸载] 错误：$*" >&2
   exit 1
 }
 
@@ -36,12 +36,12 @@ usage() {
   --install-dir PATH   指定安装目录，默认自动识别
   --keep-data          保留 Docker 数据卷
   --keep-image         保留 hydrojudge-worker 镜像
-  --purge              同时删除 /etc/hydrojudge-docker 中的账号配置
+  --purge              同时删除 /etc/hydrojudge-docker 中的账号配置和回滚副本
   -y, --yes            不询问确认
   -h, --help           显示帮助
 
 默认会删除自动扩容服务、容器、数据卷、镜像和程序文件，
-但保留 /etc/hydrojudge-docker/hydrojudge.env。
+但保留 /etc/hydrojudge-docker 中的正式配置和上次成功配置。
 EOF
 }
 
@@ -168,7 +168,7 @@ if $PURGE_CONFIG; then
   log "删除账号配置：$CONFIG_DIR"
   rm -rf -- "$CONFIG_DIR"
 else
-  log "保留账号配置：${CONFIG_DIR}/hydrojudge.env"
+  log "保留账号配置及回滚副本：$CONFIG_DIR"
 fi
 
 log "卸载完成"

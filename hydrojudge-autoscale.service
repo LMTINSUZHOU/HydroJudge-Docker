@@ -3,12 +3,15 @@ Description=HydroJudge Docker 自动扩容器
 Wants=network-online.target
 After=network-online.target docker.service
 Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 WorkingDirectory=@INSTALL_DIR@
+ExecStartPre=@PYTHON_BIN@ @INSTALL_DIR@/autoscale.py --check-config
 ExecStart=@PYTHON_BIN@ @INSTALL_DIR@/autoscale.py
-Restart=always
+Restart=on-failure
 RestartSec=10
 TimeoutStopSec=30
 UMask=0077

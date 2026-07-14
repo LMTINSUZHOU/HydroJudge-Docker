@@ -9,6 +9,7 @@ from autoscale import (
     calculate_desired_replicas,
     calculate_effective_max,
     parse_percentage,
+    scale_to,
 )
 
 
@@ -72,22 +73,44 @@ class AutoscaleCalculationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_percentage("12.5")
 
+    def test_parse_percentage_rejects_non_finite_value(self):
+        with self.assertRaises(ValueError):
+            parse_percentage("nan%")
+
+    def test_parse_percentage_rejects_negative_value(self):
+        with self.assertRaises(ValueError):
+            parse_percentage("-1%")
+
     def test_scale_up_requires_consecutive_samples(self):
         autoscaler = Autoscaler(
             config(scale_up_samples=2, cooldown_seconds=0),
             ServiceCapacity(cpu_cores=4.0, memory_bytes=8 * 1024**3),
             effective_max=4,
         )
-        with (
-            patch("autoscale.running_worker_ids", return_value=["worker-1"]),
-            patch("autoscale.collect_metrics", return_value=([300.0], [10.0])),
-            patch("autoscale.scale_to") as scale,
-            patch("autoscale.log"),
+        with patch(
+            "autoscale.running_worker_ids", return_value=["worker-1"]
+        ), patch(
+            "autoscale.collect_metrics", return_value=([300.0], [10.0])
+        ), patch(
+            "autoscale.scale_to"
+        ) as scale, patch(
+            "autoscale.log"
         ):
             autoscaler.sample()
             scale.assert_not_called()
             autoscaler.sample()
             scale.assert_called_once_with(2, False)
+
+    def test_scale_to_waits_for_healthy_workers(self):
+        with patch("autoscale.compose") as compose, patch(
+            "autoscale.run_command"
+        ) as run, patch("autoscale.log"):
+            scale_to(2, False)
+
+        compose.assert_called_once()
+        health_command = run.call_args.args[0]
+        self.assertIn("wait_healthy.py", health_command[1])
+        self.assertEqual(health_command[-2:], ["--replicas", "2"])
 
     def test_cooldown_delays_repeated_scale_up(self):
         autoscaler = Autoscaler(
@@ -96,12 +119,16 @@ class AutoscaleCalculationTests(unittest.TestCase):
             effective_max=4,
         )
         autoscaler.last_scale_at = 100.0
-        with (
-            patch("autoscale.running_worker_ids", return_value=["worker-1"]),
-            patch("autoscale.collect_metrics", return_value=([300.0], [10.0])),
-            patch("autoscale.scale_to") as scale,
-            patch("autoscale.log"),
-            patch("autoscale.time.monotonic", side_effect=[130.0, 161.0, 161.0]),
+        with patch(
+            "autoscale.running_worker_ids", return_value=["worker-1"]
+        ), patch(
+            "autoscale.collect_metrics", return_value=([300.0], [10.0])
+        ), patch(
+            "autoscale.scale_to"
+        ) as scale, patch(
+            "autoscale.log"
+        ), patch(
+            "autoscale.time.monotonic", side_effect=[130.0, 161.0, 161.0]
         ):
             autoscaler.sample()
             scale.assert_not_called()

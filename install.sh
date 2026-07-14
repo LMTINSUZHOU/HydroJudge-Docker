@@ -7,6 +7,7 @@ SCRIPT_PATH="${PROJECT_DIR}/$(basename -- "${BASH_SOURCE[0]}")"
 INSTALL_DIR="/opt/hydrojudge-docker"
 CONFIG_DIR="/etc/hydrojudge-docker"
 CONFIG_FILE="${CONFIG_DIR}/hydrojudge.env"
+LAST_GOOD_CONFIG="${CONFIG_FILE}.last-good"
 SYSTEMD_DIR="/etc/systemd/system"
 SERVICE_NAME="hydrojudge-autoscale.service"
 ENV_FILE=""
@@ -15,11 +16,11 @@ BUILD_IMAGE=true
 AUTOSCALER_WAS_ACTIVE=false
 
 log() {
-  echo "[install] $*"
+  echo "[安装] $*"
 }
 
 fail() {
-  echo "[install] error: $*" >&2
+  echo "[安装] 错误：$*" >&2
   if [[ "$AUTOSCALER_WAS_ACTIVE" == true ]] && command -v systemctl >/dev/null 2>&1; then
     systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
   fi
@@ -156,6 +157,9 @@ required_files=(
   judge.template.yaml
   langs.yaml
   autoscale.py
+  validate_config.py
+  wait_healthy.py
+  doctor.sh
   scale.sh
   update.sh
   uninstall.sh
@@ -164,6 +168,9 @@ required_files=(
   .env.example
   README.md
   tests/test_autoscale.py
+  tests/test_project_defaults.py
+  tests/test_validate_config.py
+  tests/test_wait_healthy.py
 )
 for filename in "${required_files[@]}"; do
   [[ -f "${PROJECT_DIR}/${filename}" ]] || fail "项目文件缺失：$filename"
@@ -183,29 +190,7 @@ fi
 
 log "校验配置文件"
 docker compose --env-file "$SOURCE_ENV" -f "${PROJECT_DIR}/docker-compose.yml" config --format json \
-  | python3 -c '
-import json, re, sys
-service = json.load(sys.stdin)["services"]["hydrojudge"]
-env = service["environment"]
-required = ("HYDRO_SERVER_URL", "HYDRO_JUDGE_UNAME", "HYDRO_JUDGE_PASSWORD")
-missing = [name for name in required if not str(env.get(name, "")).strip()]
-if missing:
-    print("缺少必要配置：" + ", ".join(missing), file=sys.stderr)
-    raise SystemExit(1)
-if env["HYDRO_JUDGE_PASSWORD"] == "change_me":
-    print("HYDRO_JUDGE_PASSWORD 仍为示例密码 change_me", file=sys.stderr)
-    raise SystemExit(1)
-if "example.com" in env["HYDRO_SERVER_URL"]:
-    print("HYDRO_SERVER_URL 仍为示例站点", file=sys.stderr)
-    raise SystemExit(1)
-build_args = service["build"]["args"]
-if not re.fullmatch(r"v\d+\.\d+\.\d+(?:[+-][0-9A-Za-z.-]+)?", build_args["GOJUDGE_VERSION"]):
-    print("GOJUDGE_VERSION 格式无效", file=sys.stderr)
-    raise SystemExit(1)
-if not re.fullmatch(r"\d+\.\d+\.\d+(?:[+-][0-9A-Za-z.-]+)?", build_args["HYDROJUDGE_VERSION"]):
-    print("HYDROJUDGE_VERSION 格式无效", file=sys.stderr)
-    raise SystemExit(1)
-'
+  | python3 "${PROJECT_DIR}/validate_config.py" --quiet
 
 install -d -m 0755 "$INSTALL_DIR" "${INSTALL_DIR}/tests" "$CONFIG_DIR"
 exec 9>"${INSTALL_DIR}/.update.lock"
@@ -242,6 +227,9 @@ readonly_files=(
 executable_files=(
   entrypoint.sh
   autoscale.py
+  validate_config.py
+  wait_healthy.py
+  doctor.sh
   scale.sh
   update.sh
   install.sh
@@ -262,13 +250,15 @@ for filename in "${executable_files[@]}"; do
     install -m 0755 "${PROJECT_DIR}/${filename}" "${INSTALL_DIR}/${filename}"
   fi
 done
-if [[ -f "${PROJECT_DIR}/tests/test_autoscale.py" ]]; then
+for test_file in "${PROJECT_DIR}"/tests/test_*.py; do
+  [[ -f "$test_file" ]] || continue
+  test_name="$(basename -- "$test_file")"
   if $INSTALLING_IN_PLACE; then
-    chmod 0644 "${INSTALL_DIR}/tests/test_autoscale.py"
+    chmod 0644 "${INSTALL_DIR}/tests/${test_name}"
   else
-    install -m 0644 "${PROJECT_DIR}/tests/test_autoscale.py" "${INSTALL_DIR}/tests/test_autoscale.py"
+    install -m 0644 "$test_file" "${INSTALL_DIR}/tests/${test_name}"
   fi
-fi
+done
 
 SOURCE_ENV_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$SOURCE_ENV")"
 CONFIG_FILE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CONFIG_FILE")"
@@ -286,6 +276,10 @@ rm -f "${INSTALL_DIR}/.autoscale.lock" "${INSTALL_DIR}/.autoscale.pause"
 cd "$INSTALL_DIR"
 docker compose config --quiet
 python3 -m unittest discover -s tests >/dev/null
+if $ENABLE_AUTOSCALE; then
+  log "校验自动扩容参数和宿主机容量"
+  python3 ./autoscale.py --check-config
+fi
 
 if $BUILD_IMAGE; then
   log "构建评测机镜像"
@@ -319,6 +313,7 @@ else
   log "已按要求跳过自动扩容服务"
 fi
 
+install -m 0600 "$CONFIG_FILE" "$LAST_GOOD_CONFIG"
 log "安装完成"
 trap - ERR
 docker compose ps hydrojudge
@@ -330,4 +325,5 @@ if $ENABLE_AUTOSCALE; then
 fi
 echo "版本更新：sudo ${INSTALL_DIR}/install.sh update-version"
 echo "配置更新：sudo ${INSTALL_DIR}/install.sh update-config"
+echo "环境诊断：sudo ${INSTALL_DIR}/doctor.sh"
 echo "卸载命令：sudo ${INSTALL_DIR}/install.sh uninstall"

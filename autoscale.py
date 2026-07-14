@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely scale HydroJudge Docker Compose workers up from host-side metrics."""
+"""根据宿主机指标安全地向上扩容 HydroJudge Docker Compose 评测容器。"""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parent
+COMPOSE_OPTIONS: list[str] = []
 
 
 def log(level: str, message: str) -> None:
@@ -37,16 +38,16 @@ def run_command(args: list[str], timeout: int = 30) -> str:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"command timed out: {' '.join(args)}") from exc
+        raise RuntimeError(f"命令执行超时：{' '.join(args)}") from exc
     if result.returncode:
         detail = result.stderr.strip().splitlines()
         suffix = f": {detail[-1]}" if detail else ""
-        raise RuntimeError(f"command failed ({result.returncode}): {' '.join(args)}{suffix}")
+        raise RuntimeError(f"命令执行失败（退出码 {result.returncode}）：{' '.join(args)}{suffix}")
     return result.stdout
 
 
 def compose(*args: str, timeout: int = 30) -> str:
-    return run_command(["docker", "compose", *args], timeout=timeout)
+    return run_command(["docker", "compose", *COMPOSE_OPTIONS, *args], timeout=timeout)
 
 
 def parse_compose_environment(output: str) -> dict[str, str]:
@@ -65,7 +66,7 @@ def parse_bool(value: str, name: str) -> bool:
         return True
     if normalized == "false":
         return False
-    raise ValueError(f"{name} must be true or false (got: {value})")
+    raise ValueError(f"{name} 必须是 true 或 false，当前值：{value}")
 
 
 def parse_int(values: dict[str, str], name: str, default: int, minimum: int) -> int:
@@ -73,9 +74,9 @@ def parse_int(values: dict[str, str], name: str, default: int, minimum: int) -> 
     try:
         value = int(raw)
     except ValueError as exc:
-        raise ValueError(f"{name} must be an integer (got: {raw})") from exc
+        raise ValueError(f"{name} 必须是整数，当前值：{raw}") from exc
     if value < minimum:
-        raise ValueError(f"{name} must be >= {minimum} (got: {value})")
+        raise ValueError(f"{name} 必须大于等于 {minimum}，当前值：{value}")
     return value
 
 
@@ -86,9 +87,9 @@ def parse_float(
     try:
         value = float(raw)
     except ValueError as exc:
-        raise ValueError(f"{name} must be a number (got: {raw})") from exc
+        raise ValueError(f"{name} 必须是数字，当前值：{raw}") from exc
     if not minimum <= value <= maximum:
-        raise ValueError(f"{name} must be between {minimum} and {maximum} (got: {value})")
+        raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间，当前值：{value}")
     return value
 
 
@@ -132,7 +133,7 @@ class AutoscaleConfig:
             or parse_bool(values.get("AUTOSCALE_DRY_RUN", "false"), "AUTOSCALE_DRY_RUN"),
         )
         if config.max_replicas < config.min_replicas:
-            raise ValueError("AUTOSCALE_MAX_REPLICAS must be >= AUTOSCALE_MIN_REPLICAS")
+            raise ValueError("AUTOSCALE_MAX_REPLICAS 不能小于 AUTOSCALE_MIN_REPLICAS")
         return config
 
 
@@ -183,9 +184,11 @@ def calculate_desired_replicas(
     cpu_values = list(cpu_percentages)
     memory_values = list(memory_percentages)
     if not cpu_values or len(cpu_values) != len(memory_values):
-        raise ValueError("CPU and memory samples must contain the same non-zero number of workers")
-    if service_cpu_cores <= 0:
-        raise ValueError("service CPU limit must be greater than zero")
+        raise ValueError("CPU 与内存指标必须包含相同且非零的评测容器数量")
+    if service_cpu_cores <= 0 or not math.isfinite(service_cpu_cores):
+        raise ValueError("单个评测容器的 CPU 上限必须是有限正数")
+    if any(not math.isfinite(value) or value < 0 for value in cpu_values + memory_values):
+        raise ValueError("Docker 指标必须是有限的非负百分比")
 
     cpu_capacity_percent = service_cpu_cores * 100.0
     cpu_equivalents = sum(value / cpu_capacity_percent for value in cpu_values)
@@ -215,7 +218,7 @@ def load_service_capacity() -> ServiceCapacity:
     cpu_cores = float(service.get("cpus") or 0)
     memory_bytes = int(service.get("mem_limit") or 0)
     if cpu_cores <= 0 or memory_bytes <= 0:
-        raise ValueError("hydrojudge must define positive cpus and mem_limit values")
+        raise ValueError("hydrojudge 服务必须设置正数 cpus 和 mem_limit")
     return ServiceCapacity(cpu_cores=cpu_cores, memory_bytes=memory_bytes)
 
 
@@ -235,8 +238,11 @@ def running_worker_ids() -> list[str]:
 def parse_percentage(value: str) -> float:
     normalized = value.strip()
     if not normalized.endswith("%"):
-        raise ValueError(f"invalid Docker percentage: {value}")
-    return float(normalized[:-1])
+        raise ValueError(f"无效的 Docker 百分比：{value}")
+    percentage = float(normalized[:-1])
+    if not math.isfinite(percentage) or percentage < 0:
+        raise ValueError(f"Docker 百分比必须是有限非负数：{value}")
+    return percentage
 
 
 def collect_metrics(container_ids: list[str]) -> tuple[list[float], list[float]]:
@@ -258,19 +264,19 @@ def collect_metrics(container_ids: list[str]) -> tuple[list[float], list[float]]
             continue
         fields = line.split("\t")
         if len(fields) != 2:
-            raise ValueError(f"unexpected docker stats output: {line}")
+            raise ValueError(f"无法识别 docker stats 输出：{line}")
         cpu_values.append(parse_percentage(fields[0]))
         memory_values.append(parse_percentage(fields[1]))
     if len(cpu_values) != len(container_ids):
         raise RuntimeError(
-            f"expected metrics for {len(container_ids)} workers, received {len(cpu_values)}"
+            f"应收到 {len(container_ids)} 个评测容器的指标，实际收到 {len(cpu_values)} 个"
         )
     return cpu_values, memory_values
 
 
 def scale_to(replicas: int, dry_run: bool) -> None:
     if dry_run:
-        log("DRY-RUN", f"would scale hydrojudge to {replicas} replicas")
+        log("演练", f"计划将 HydroJudge 调整为 {replicas} 个副本，本次不执行")
         return
     compose(
         "up",
@@ -281,6 +287,11 @@ def scale_to(replicas: int, dry_run: bool) -> None:
         "hydrojudge",
         timeout=300,
     )
+    run_command(
+        [sys.executable, str(ROOT / "wait_healthy.py"), "--replicas", str(replicas)],
+        timeout=180,
+    )
+    log("信息", f"{replicas} 个 HydroJudge 副本已通过健康检查")
 
 
 class Autoscaler:
@@ -299,14 +310,14 @@ class Autoscaler:
     def sample(self) -> None:
         if (ROOT / ".autoscale.pause").exists():
             self.high_samples = 0
-            log("INFO", "paused while a worker update is in progress")
+            log("信息", "检测到更新任务，暂时停止扩容采样")
             return
 
         container_ids = running_worker_ids()
         current = len(container_ids)
         if current < self.config.min_replicas:
             target = min(self.config.min_replicas, self.effective_max)
-            log("WARN", f"only {current} workers are running; restoring minimum {target}")
+            log("警告", f"当前仅运行 {current} 个副本，恢复最小副本数 {target}")
             scale_to(target, self.config.dry_run)
             self.last_scale_at = time.monotonic()
             self.high_samples = 0
@@ -321,15 +332,15 @@ class Autoscaler:
             self.effective_max,
         )
         capped = (
-            f" raw={decision.uncapped_replicas} capacity-capped"
+            f" 原始期望={decision.uncapped_replicas}（已受容量保护限制）"
             if decision.uncapped_replicas > decision.desired_replicas
             else ""
         )
         log(
-            "INFO",
-            f"replicas={current} cpu={decision.average_cpu_percent:.1f}% "
-            f"memory={decision.average_memory_percent:.1f}% "
-            f"desired={decision.desired_replicas}/{self.effective_max}{capped}",
+            "信息",
+            f"副本={current} CPU={decision.average_cpu_percent:.1f}% "
+            f"内存={decision.average_memory_percent:.1f}% "
+            f"期望={decision.desired_replicas}/{self.effective_max}{capped}",
         )
 
         if decision.desired_replicas <= current:
@@ -339,14 +350,14 @@ class Autoscaler:
         self.high_samples += 1
         if self.high_samples < self.config.scale_up_samples:
             log(
-                "INFO",
-                f"scale-up pressure sample {self.high_samples}/{self.config.scale_up_samples}",
+                "信息",
+                f"扩容压力连续采样 {self.high_samples}/{self.config.scale_up_samples}",
             )
             return
 
         cooldown_remaining = self.config.cooldown_seconds - (time.monotonic() - self.last_scale_at)
         if cooldown_remaining > 0:
-            log("INFO", f"scale-up cooldown active for another {math.ceil(cooldown_remaining)}s")
+            log("信息", f"扩容冷却中，剩余 {math.ceil(cooldown_remaining)} 秒")
             return
 
         target = min(
@@ -354,7 +365,7 @@ class Autoscaler:
             self.effective_max,
             current + self.config.max_step,
         )
-        log("INFO", f"scaling hydrojudge from {current} to {target} replicas")
+        log("信息", f"将 HydroJudge 从 {current} 个副本扩容到 {target} 个")
         scale_to(target, self.config.dry_run)
         self.last_scale_at = time.monotonic()
         self.high_samples = 0
@@ -366,7 +377,7 @@ def acquire_process_lock() -> object:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         lock_file.close()
-        raise RuntimeError("another autoscale.py process is already running") from exc
+        raise RuntimeError("同一项目已有另一个 autoscale.py 进程在运行") from exc
     lock_file.write(f"{os.getpid()}\n")
     lock_file.flush()
     return lock_file
@@ -374,9 +385,23 @@ def acquire_process_lock() -> object:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--once", action="store_true", help="collect one sample and exit")
-    parser.add_argument("--dry-run", action="store_true", help="log scaling actions without applying them")
+    parser.add_argument("--once", action="store_true", help="只采集一次指标后退出")
+    parser.add_argument("--dry-run", action="store_true", help="只输出扩容决策，不实际调整容器")
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="检查自动扩容配置和宿主机容量后退出，不采集容器指标",
+    )
+    parser.add_argument("--env-file", help="使用指定的 Compose 环境变量文件")
     args = parser.parse_args()
+
+    if args.check_config and (args.once or args.dry_run):
+        parser.error("--check-config 不能与 --once 或 --dry-run 同时使用")
+    if args.env_file:
+        env_file = Path(args.env_file).expanduser().resolve()
+        if not env_file.is_file():
+            parser.error(f"配置文件不存在：{env_file}")
+        COMPOSE_OPTIONS.extend(["--env-file", str(env_file)])
 
     lock_file = None
     stop_event = threading.Event()
@@ -387,23 +412,18 @@ def main() -> int:
         service = load_service_capacity()
         host = load_host_capacity()
         effective_max = calculate_effective_max(config, service, host)
-        lock_file = acquire_process_lock()
-
-        signal.signal(signal.SIGINT, lambda _signum, _frame: stop_event.set())
-        signal.signal(signal.SIGTERM, lambda _signum, _frame: stop_event.set())
-
+        action = "自动扩容配置检查通过" if args.check_config else "启动仅向上扩容服务"
         log(
-            "INFO",
-            f"starting scale-up-only autoscaler: min={config.min_replicas} "
-            f"configured-max={config.max_replicas} effective-max={effective_max} "
-            f"worker={service.cpu_cores:g}CPU/{service.memory_bytes / 1024**3:.1f}GiB "
-            f"host={host.cpu_cores}CPU/{host.memory_bytes / 1024**3:.1f}GiB",
+            "信息",
+            f"{action}：最小副本={config.min_replicas} "
+            f"配置上限={config.max_replicas} 有效上限={effective_max} "
+            f"单副本={service.cpu_cores:g}CPU/{service.memory_bytes / 1024**3:.1f}GiB "
+            f"宿主机={host.cpu_cores}CPU/{host.memory_bytes / 1024**3:.1f}GiB",
         )
         if effective_max < config.max_replicas:
             log(
-                "WARN",
-                "configured maximum was reduced by host capacity protection; lower per-worker "
-                "limits or use a larger Docker host to permit more replicas",
+                "警告",
+                "宿主机容量保护降低了有效上限；如需更多副本，请降低单副本限制或升级宿主机",
             )
         usable_ratio = 1.0 - config.host_headroom_percent / 100.0
         if config.enforce_host_capacity and (
@@ -411,27 +431,32 @@ def main() -> int:
             or service.memory_bytes * config.min_replicas > host.memory_bytes * usable_ratio
         ):
             log(
-                "WARN",
-                "the configured minimum worker limits exceed protected host capacity; "
-                "the minimum is kept, but its CPU or memory limit should be reduced",
+                "警告",
+                "最小副本所需资源超过受保护的宿主机容量；仍会保留最小副本，但建议降低资源限制",
             )
+        if args.check_config:
+            return 0
+
+        lock_file = acquire_process_lock()
+        signal.signal(signal.SIGINT, lambda _signum, _frame: stop_event.set())
+        signal.signal(signal.SIGTERM, lambda _signum, _frame: stop_event.set())
 
         autoscaler = Autoscaler(config, service, effective_max)
         while not stop_event.is_set():
             try:
                 autoscaler.sample()
-            except Exception as exc:  # Keep the monitor alive through transient Docker errors.
+            except Exception as exc:  # Docker 短暂异常不应终止常驻监控进程。
                 autoscaler.high_samples = 0
-                log("ERROR", str(exc))
+                log("错误", str(exc))
                 if args.once:
                     return 1
             if args.once:
                 break
             stop_event.wait(config.interval_seconds)
-        log("INFO", "stopped")
+        log("信息", "自动扩容服务已停止")
         return 0
     except (ValueError, RuntimeError, KeyError, json.JSONDecodeError) as exc:
-        log("ERROR", str(exc))
+        log("错误", str(exc))
         return 2
     finally:
         if lock_file is not None:

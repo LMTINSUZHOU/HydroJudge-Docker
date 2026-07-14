@@ -8,13 +8,15 @@ services:
       args:
         GOJUDGE_VERSION: "${GOJUDGE_VERSION:-v1.12.1}"
         HYDROJUDGE_VERSION: "${HYDROJUDGE_VERSION:-4.0.5}"
+        UBUNTU_MIRROR: "${UBUNTU_MIRROR:-http://mirrors.tuna.tsinghua.edu.cn/ubuntu}"
+        NPM_REGISTRY: "${NPM_REGISTRY:-https://registry.npmmirror.com}"
     image: hydrojudge-worker:local
     restart: unless-stopped
     privileged: true
 
     cpus: "${CONTAINER_CPUS:-4.0}"
-    mem_limit: "${CONTAINER_MEMORY_LIMIT:-8g}"
-    memswap_limit: "${CONTAINER_MEMORY_SWAP_LIMIT:-8g}"
+    mem_limit: "${CONTAINER_MEMORY_LIMIT:-12g}"
+    memswap_limit: "${CONTAINER_MEMORY_SWAP_LIMIT:-12g}"
     shm_size: "${CONTAINER_SHM_SIZE:-2g}"
 
     ulimits:
@@ -24,9 +26,9 @@ services:
 
     environment:
       TZ: "${TZ:-Asia/Kuala_Lumpur}"
-      HYDRO_SERVER_URL: "${HYDRO_SERVER_URL}"
-      HYDRO_JUDGE_UNAME: "${HYDRO_JUDGE_UNAME}"
-      HYDRO_JUDGE_PASSWORD: "${HYDRO_JUDGE_PASSWORD}"
+      HYDRO_SERVER_URL: "${HYDRO_SERVER_URL:?请在 .env 中设置 Hydro 站点地址}"
+      HYDRO_JUDGE_UNAME: "${HYDRO_JUDGE_UNAME:?请在 .env 中设置评测账号}"
+      HYDRO_JUDGE_PASSWORD: "${HYDRO_JUDGE_PASSWORD:?请在 .env 中设置评测账号密码}"
       HYDRO_HOST_TYPE: "${HYDRO_HOST_TYPE:-hydro}"
 
       HYDRO_MEMORY_MAX: "${HYDRO_MEMORY_MAX:-2048m}"
