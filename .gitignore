@@ -1,6 +1,7 @@
 .env
 .autoscale.lock
 .autoscale.pause
+.update.lock
 .hydrojudge-install
 .DS_Store
 __pycache__/

@@ -60,18 +60,21 @@ GOJUDGE_PARALLELISM=2
 - Docker；
 - Docker Compose 插件；
 - Python 3.9 或更高版本；
+- `flock`（通常由 `util-linux` 提供）；
 - systemd。
 
 填写当前目录中的 `.env` 后执行：
 
 ```bash
-sudo ./install.sh
+sudo ./install.sh install
 ```
+
+为了兼容旧用法，首次安装时也可以直接执行 `sudo ./install.sh`。
 
 也可以指定其他配置文件：
 
 ```bash
-sudo ./install.sh --env-file /path/to/production.env
+sudo ./install.sh install --env-file /path/to/production.env
 ```
 
 安装脚本将自动完成以下操作：
@@ -95,6 +98,21 @@ sudo ./install.sh --env-file /path/to/production.env
 | `--no-autoscale` | 不安装或启用自动扩容服务 |
 
 重复执行安装脚本可以覆盖更新程序文件。除非显式传入 `--env-file`，已有的 `/etc/hydrojudge-docker/hydrojudge.env` 会被保留。
+
+安装完成后，同一个 `install.sh` 也是统一管理入口：
+
+| 命令 | 用途 |
+| --- | --- |
+| `install` | 安装或覆盖安装评测机 |
+| `uninstall` | 安全卸载评测机 |
+| `update-version` | 自动更新到最新 go-judge/HydroJudge 并重建镜像 |
+| `update-config` | 读取默认位置的 `.env` 并应用配置 |
+
+查看完整帮助：
+
+```bash
+sudo /opt/hydrojudge-docker/install.sh help
+```
 
 查看自动扩容服务状态和日志：
 
@@ -208,34 +226,73 @@ docker compose ps hydrojudge
 
 当前实现只负责单台宿主机上的 Docker Compose 扩容。跨多台服务器的自动扩容需要 Kubernetes、Docker Swarm 等容器编排系统。
 
-## 7. 更新评测机镜像
+## 7. 更新评测机版本
+
+直接更新到两个组件的最新稳定版：
 
 ```bash
-./update.sh
+sudo /opt/hydrojudge-docker/install.sh update-version
 ```
 
-使用一键安装后的目录时执行：
+脚本会在每次执行时查询：
+
+- go-judge 官方 GitHub 仓库的最新稳定 Release；
+- npm Registry 中 `@hydrooj/hydrojudge` 的 `latest` 版本。
+
+查询成功后，脚本会自动更新正式配置中的 `GOJUDGE_VERSION` 和 `HYDROJUDGE_VERSION`。如果外部版本接口暂时无法访问，可以手动指定两个版本作为回退：
 
 ```bash
-sudo /opt/hydrojudge-docker/update.sh
+sudo /opt/hydrojudge-docker/install.sh update-version \
+  --gojudge-version v1.12.1 \
+  --hydrojudge-version 4.0.5
 ```
 
-更新脚本将执行以下操作：
+版本更新将执行以下操作：
 
-1. 暂停自动扩容操作；
-2. 根据 `GOJUDGE_VERSION` 和 `HYDROJUDGE_VERSION` 无缓存重建镜像；
-3. 保留当前正在运行的副本数；
-4. 重建评测容器；
-5. 显示容器状态和最近 100 行日志。
+1. 从默认位置 `/etc/hydrojudge-docker/hydrojudge.env` 读取现有配置；
+2. 查询并校验最新稳定版本；
+3. 将新版本安全写回正式配置；
+4. 暂停自动扩容操作；
+5. 根据新版本无缓存重建镜像；
+6. 保留当前正在运行的副本数，且不会自动缩容；
+7. 使用新镜像重建评测容器；
+8. 重启自动扩容服务并显示容器状态。
 
-升级 go-judge 或 HydroJudge 时，应先修改 `.env` 中的对应版本号，再运行更新脚本。
+版本更新会重建容器，可能中断正在执行的评测任务，应在维护时间执行。
 
-## 8. 一键卸载
+## 8. 更新评测机配置
+
+直接修改默认位置的正式配置，然后应用：
+
+```bash
+sudoedit /etc/hydrojudge-docker/hydrojudge.env
+sudo /opt/hydrojudge-docker/install.sh update-config
+```
+
+`update-config` 默认只读取 `/etc/hydrojudge-docker/hydrojudge.env`，不再自动读取源码目录中的 `.env`。如需从其他文件导入，仍可显式指定：
+
+```bash
+sudo /opt/hydrojudge-docker/install.sh update-config \
+  --env-file /path/to/production.env
+```
+
+配置更新会：
+
+1. 先在临时文件中验证 Hydro 地址、账号、密码和 Compose 配置；
+2. 防止意外修改 `COMPOSE_PROJECT_NAME` 而创建第二套容器；
+3. 将正式配置权限固定为 `0600`；
+4. 暂停自动扩容并通过 Compose 应用配置；
+5. 保留当前副本数，允许按新的 `WORKER_REPLICAS` 扩容，但不会自动缩容；
+6. 重启自动扩容服务，使新的自动扩容参数立即生效。
+
+`update-config` 不重建镜像。如果修改了 `GOJUDGE_VERSION` 或 `HYDROJUDGE_VERSION`，脚本会拒绝继续并提示使用 `update-version`。修改容器资源、环境变量等设置时，Compose 可能重建容器，因此也建议在维护时间执行。
+
+## 9. 一键卸载
 
 使用安装目录中的卸载脚本：
 
 ```bash
-sudo /opt/hydrojudge-docker/uninstall.sh
+sudo /opt/hydrojudge-docker/install.sh uninstall
 ```
 
 卸载前会显示将要删除的内容并要求确认。默认执行以下操作：
@@ -250,26 +307,26 @@ sudo /opt/hydrojudge-docker/uninstall.sh
 完整卸载并删除评测账号配置：
 
 ```bash
-sudo /opt/hydrojudge-docker/uninstall.sh --purge
+sudo /opt/hydrojudge-docker/install.sh uninstall --purge
 ```
 
 无人值守完整卸载：
 
 ```bash
-sudo /opt/hydrojudge-docker/uninstall.sh --purge --yes
+sudo /opt/hydrojudge-docker/install.sh uninstall --purge --yes
 ```
 
 保留数据卷或镜像：
 
 ```bash
-sudo /opt/hydrojudge-docker/uninstall.sh --keep-data --keep-image
+sudo /opt/hydrojudge-docker/install.sh uninstall --keep-data --keep-image
 ```
 
 `--keep-data` 主要用于故障排查。项目使用的匿名数据卷在重新安装后不会自动重新挂载，长期保留前应手动记录卷名或完成数据备份。
 
 卸载脚本只会在安装目录存在 `.hydrojudge-install` 标记时开始清理，并拒绝 `/`、`/opt`、`/usr` 等危险路径。因此，从源码目录误执行卸载脚本不会删除同名服务、卷或镜像。
 
-## 9. 手动停止服务
+## 10. 手动停止服务
 
 停止并删除评测容器：
 
@@ -285,7 +342,7 @@ docker compose down -v
 
 `down -v` 会永久删除缓存数据，执行前请确认不再需要这些内容。
 
-## 10. 检查资源限制
+## 11. 检查资源限制
 
 查看当前资源使用情况：
 
@@ -309,7 +366,7 @@ MemorySwap=8589934592
 ShmSize=2147483648
 ```
 
-## 11. 语言配置
+## 12. 语言配置
 
 镜像内固定安装以下运行环境：
 
@@ -355,7 +412,7 @@ docker compose up -d --force-recreate hydrojudge
 docker compose exec hydrojudge bash -lc 'gcc --version && g++ --version && javac -version && java -version && python3.12 --version && pypy3 --version && ! command -v go'
 ```
 
-## 12. 安全与运行注意事项
+## 13. 安全与运行注意事项
 
 - go-judge 需要创建受限执行环境，因此容器必须使用 `privileged: true`；
 - 启动脚本会把评测配置写入 `/root/.hydro/judge.yaml`，并设置为 `0600` 权限；
@@ -367,7 +424,7 @@ docker compose exec hydrojudge bash -lc 'gcc --version && g++ --version && javac
 - 启用新的语言前，必须同时在 Dockerfile 中安装相应编译器，并在 Hydro 服务端配置对应命令；
 - 自动扩容只使用资源利用率作为负载信号，不等同于读取 Hydro 服务端的任务队列长度。
 
-## 13. 配置与脚本校验
+## 14. 配置与脚本校验
 
 检查 Compose 配置：
 

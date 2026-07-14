@@ -28,19 +28,67 @@ fail() {
 
 usage() {
   cat <<'EOF'
-用法：sudo ./install.sh [选项]
+HydroJudge Docker 统一管理脚本
 
-选项：
+用法：
+  sudo ./install.sh install [安装选项]
+  sudo ./install.sh uninstall [卸载选项]
+  sudo ./install.sh update-version [更新选项]
+  sudo ./install.sh update-config [更新选项]
+
+命令：
+  install          安装或覆盖安装评测机
+  uninstall        卸载评测机，默认保留账号配置
+  update-version   更新到最新 go-judge/HydroJudge 并重建镜像
+  update-config    同步修改后的 .env 并应用到容器
+
+安装选项：
   --install-dir PATH   安装目录，默认 /opt/hydrojudge-docker
   --env-file FILE      使用指定的 .env 配置文件
   --skip-build         不重建镜像，要求 hydrojudge-worker:local 已存在
   --no-autoscale       不安装或启用自动扩容 systemd 服务
   -h, --help           显示帮助
 
+不带命令直接传入安装选项仍按 install 处理。
+其他命令的详细选项可使用“sudo ./install.sh <命令> --help”查看。
+
 重复执行安装脚本可覆盖升级程序文件。已有的
 /etc/hydrojudge-docker/hydrojudge.env 默认会被保留。
 EOF
 }
+
+COMMAND="install"
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    install)
+      shift
+      ;;
+    uninstall|update-version|update-config)
+      COMMAND="$1"
+      shift
+      ;;
+    help)
+      usage
+      exit 0
+      ;;
+    --*|-*)
+      ;;
+    *)
+      fail "未知命令：$1；可用命令为 install、uninstall、update-version、update-config"
+      ;;
+  esac
+fi
+
+case "$COMMAND" in
+  uninstall)
+    [[ -x "${PROJECT_DIR}/uninstall.sh" ]] || fail "缺少卸载脚本：${PROJECT_DIR}/uninstall.sh"
+    exec "${PROJECT_DIR}/uninstall.sh" "$@"
+    ;;
+  update-version|update-config)
+    [[ -x "${PROJECT_DIR}/update.sh" ]] || fail "缺少更新脚本：${PROJECT_DIR}/update.sh"
+    exec "${PROJECT_DIR}/update.sh" "$COMMAND" "$@"
+    ;;
+esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -93,7 +141,7 @@ fi
 [[ "$(uname -s)" == "Linux" ]] || fail "自动安装脚本仅支持 Linux"
 [[ -d /run/systemd/system ]] || fail "未检测到正在运行的 systemd"
 
-for command_name in docker python3 install sed systemctl; do
+for command_name in docker flock python3 install sed systemctl; do
   command -v "$command_name" >/dev/null 2>&1 || fail "未找到命令：$command_name"
 done
 docker compose version >/dev/null 2>&1 || fail "未安装 Docker Compose 插件"
@@ -136,7 +184,7 @@ fi
 log "校验配置文件"
 docker compose --env-file "$SOURCE_ENV" -f "${PROJECT_DIR}/docker-compose.yml" config --format json \
   | python3 -c '
-import json, sys
+import json, re, sys
 service = json.load(sys.stdin)["services"]["hydrojudge"]
 env = service["environment"]
 required = ("HYDRO_SERVER_URL", "HYDRO_JUDGE_UNAME", "HYDRO_JUDGE_PASSWORD")
@@ -150,7 +198,18 @@ if env["HYDRO_JUDGE_PASSWORD"] == "change_me":
 if "example.com" in env["HYDRO_SERVER_URL"]:
     print("HYDRO_SERVER_URL 仍为示例站点", file=sys.stderr)
     raise SystemExit(1)
+build_args = service["build"]["args"]
+if not re.fullmatch(r"v\d+\.\d+\.\d+(?:[+-][0-9A-Za-z.-]+)?", build_args["GOJUDGE_VERSION"]):
+    print("GOJUDGE_VERSION 格式无效", file=sys.stderr)
+    raise SystemExit(1)
+if not re.fullmatch(r"\d+\.\d+\.\d+(?:[+-][0-9A-Za-z.-]+)?", build_args["HYDROJUDGE_VERSION"]):
+    print("HYDROJUDGE_VERSION 格式无效", file=sys.stderr)
+    raise SystemExit(1)
 '
+
+install -d -m 0755 "$INSTALL_DIR" "${INSTALL_DIR}/tests" "$CONFIG_DIR"
+exec 9>"${INSTALL_DIR}/.update.lock"
+flock -n 9 || fail "另一个安装、更新或卸载任务正在运行"
 
 restore_autoscaler_on_error() {
   if $AUTOSCALER_WAS_ACTIVE; then
@@ -166,7 +225,6 @@ if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
 fi
 
 log "安装程序文件到 $INSTALL_DIR"
-install -d -m 0755 "$INSTALL_DIR" "${INSTALL_DIR}/tests" "$CONFIG_DIR"
 
 INSTALLING_IN_PLACE=false
 [[ "$PROJECT_DIR" -ef "$INSTALL_DIR" ]] && INSTALLING_IN_PLACE=true
@@ -270,4 +328,6 @@ echo "安装目录：$INSTALL_DIR"
 if $ENABLE_AUTOSCALE; then
   echo "扩容日志：journalctl -u $SERVICE_NAME -f"
 fi
-echo "卸载命令：sudo ${INSTALL_DIR}/uninstall.sh"
+echo "版本更新：sudo ${INSTALL_DIR}/install.sh update-version"
+echo "配置更新：sudo ${INSTALL_DIR}/install.sh update-config"
+echo "卸载命令：sudo ${INSTALL_DIR}/install.sh uninstall"

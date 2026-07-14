@@ -28,7 +28,9 @@ fail() {
 
 usage() {
   cat <<'EOF'
-用法：sudo ./uninstall.sh [选项]
+用法：sudo ./install.sh uninstall [选项]
+
+也可以直接执行：sudo ./uninstall.sh [选项]
 
 选项：
   --install-dir PATH   指定安装目录，默认自动识别
@@ -110,6 +112,10 @@ if ! $ASSUME_YES; then
   read -r -p "确认继续？[y/N] " answer </dev/tty
   [[ "$answer" == "y" || "$answer" == "Y" ]] || exit 0
 fi
+
+command -v flock >/dev/null 2>&1 || fail "未找到命令：flock"
+exec 9>"${INSTALL_DIR}/.update.lock"
+flock -n 9 || fail "另一个安装、更新或卸载任务正在运行"
 
 log "停止并删除自动扩容服务"
 if command -v systemctl >/dev/null 2>&1; then

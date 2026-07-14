@@ -6,4 +6,5 @@ tests
 .env
 .autoscale.lock
 .autoscale.pause
+.update.lock
 .hydrojudge-install
